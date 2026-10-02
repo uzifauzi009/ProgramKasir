@@ -1,35 +1,52 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import mysql.connector
-from mysql.connector import Error
+import pg8000.dbapi
 from datetime import datetime
 from werkzeug.security import check_password_hash, generate_password_hash
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app) #untuk mengizinkan permintaan dari domain lain
+CORS(app)
 
-#konfigurasi koneksi database
-db_config = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'user': os.getenv('DB_USER', 'root'),
-    'password': os.getenv('DB_PASSWORD', ''),
-    'database': os.getenv('DB_NAME', 'db_kasir'),
-    'port': int(os.getenv('DB_PORT', '3306'))
-}
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 def get_db_connection():
-    """Fungsi untuk membuat koneksi ke database MySQL"""
-    return mysql.connector.connect(**db_config)
+    """Fungsi untuk membuat koneksi ke database PostgreSQL"""
+    if DATABASE_URL:
+        # Parse DATABASE_URL format: postgresql://user:pass@host:port/dbname
+        match = re.match(r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', DATABASE_URL)
+        if match:
+            user, password, host, port, database = match.groups()
+            conn = pg8000.dbapi.connect(
+                host=host,
+                user=user,
+                password=password,
+                database=database,
+                port=int(port)
+            )
+            conn.autocommit = False
+            return conn
+    
+    # Local development
+    conn = pg8000.dbapi.connect(
+        host=os.getenv('DB_HOST', 'localhost'),
+        user=os.getenv('DB_USER', 'postgres'),
+        password=os.getenv('DB_PASSWORD', ''),
+        database=os.getenv('DB_NAME', 'db_kasir'),
+        port=int(os.getenv('DB_PORT', '5432'))
+    )
+    conn.autocommit = False
+    return conn
 
 
 def ensure_default_user(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pengguna (
-            id_pengguna INT AUTO_INCREMENT PRIMARY KEY,
+            id_pengguna SERIAL PRIMARY KEY,
             username VARCHAR(50) NOT NULL UNIQUE,
             password_hash VARCHAR(255) NOT NULL,
             nama_lengkap VARCHAR(100) NOT NULL,
@@ -38,7 +55,7 @@ def ensure_default_user(cursor):
         )
     """)
     cursor.execute("SELECT id_pengguna FROM pengguna WHERE username = %s", ('admin',))
-    if cursor.fetchone() is None:
+    if not cursor.fetchone():
         cursor.execute(
             "INSERT INTO pengguna (username, password_hash, nama_lengkap, role) VALUES (%s, %s, %s, %s)",
             ('admin', generate_password_hash('admin123'), 'Administrator', 'admin')
@@ -48,13 +65,13 @@ def ensure_default_user(cursor):
 def ensure_product_status(cursor):
     cursor.execute("""
         SELECT COUNT(*) AS total
-        FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'produk' AND COLUMN_NAME = 'aktif'
-    """, (db_config['database'],))
-    column_info = cursor.fetchone()
-    column_count = column_info['total'] if isinstance(column_info, dict) else column_info[0]
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'produk' AND column_name = 'aktif'
+    """)
+    result = cursor.fetchone()
+    column_count = result[0] if result else 0
     if column_count == 0:
-        cursor.execute("ALTER TABLE produk ADD COLUMN aktif TINYINT(1) NOT NULL DEFAULT 1")
+        cursor.execute("ALTER TABLE produk ADD COLUMN aktif SMALLINT NOT NULL DEFAULT 1")
 
 
 @app.route('/api/login', methods=['POST'])
@@ -70,54 +87,59 @@ def login():
     cursor = None
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
         ensure_default_user(cursor)
         conn.commit()
+
         cursor.execute(
             "SELECT username, password_hash, nama_lengkap, role FROM pengguna WHERE username = %s",
             (username,)
         )
         user = cursor.fetchone()
 
-        if user is None or not check_password_hash(user['password_hash'], password):
+        if user is None or not check_password_hash(user[1], password):
             return jsonify({"success": False, "message": "Username atau password salah."}), 401
 
         return jsonify({
             "success": True,
             "data": {
-                "username": user['username'],
-                "nama_lengkap": user['nama_lengkap'],
-                "role": user['role']
+                "username": user[0],
+                "nama_lengkap": user[2],
+                "role": user[3]
             }
         }), 200
-    except Error as e:
+    except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
-        if cursor and conn and conn.is_connected():
+        if cursor:
             cursor.close()
+        if conn:
             conn.close()
 
-# 1. Api produk (daftar produk)
+
 @app.route('/api/produk', methods=['GET', 'POST'])
 def handle_produk():
-    # A. Mengambil Daftar Produk (GET)
     if request.method == 'GET':
         conn = None
+        cursor = None
         try:
             conn = get_db_connection()
-            cursor = conn.cursor(dictionary=True)
+            cursor = conn.cursor()
             ensure_product_status(cursor)
             cursor.execute("SELECT * FROM produk WHERE aktif = 1 ORDER BY nama_produk ASC")
             produk_list = cursor.fetchall()
-            return jsonify({"success": True, "data": produk_list}), 200
-        except Error as e:
+            # Convert tuple rows to dict
+            columns = [desc[0] for desc in cursor.description]
+            produk_dict = [dict(zip(columns, row)) for row in produk_list]
+            return jsonify({"success": True, "data": produk_dict}), 200
+        except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
         finally:
-            if conn and conn.is_connected():
+            if cursor:
                 cursor.close()
+            if conn:
                 conn.close()
 
-    # B. Menambah Produk Baru (POST)
     elif request.method == 'POST':
         data = request.json
         kode_produk = data.get('kode_produk')
@@ -130,24 +152,22 @@ def handle_produk():
             return jsonify({"success": False, "message": "Kode, nama, dan harga wajib diisi!"}), 400
 
         conn = None
+        cursor = None
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
             ensure_product_status(cursor)
+
             cursor.execute(
                 "SELECT id_produk FROM produk WHERE kode_produk = %s AND aktif = 0",
                 (kode_produk,)
             )
-            archived_product = cursor.fetchone()
-
-            if archived_product:
+            archived = cursor.fetchone()
+            if archived:
                 cursor.execute(
-                    """
-                    UPDATE produk
-                    SET nama_produk = %s, kategori = %s, harga_jual = %s, stok = %s, aktif = 1
-                    WHERE id_produk = %s
-                    """,
-                    (nama_produk, kategori, harga_jual, stok, archived_product[0])
+                    """UPDATE produk SET nama_produk = %s, kategori = %s, harga_jual = %s, stok = %s, aktif = 1
+                       WHERE id_produk = %s""",
+                    (nama_produk, kategori, harga_jual, stok, archived[0])
                 )
                 conn.commit()
                 return jsonify({"success": True, "message": "Produk berhasil diaktifkan kembali."}), 200
@@ -156,22 +176,27 @@ def handle_produk():
                 "SELECT nama_produk FROM produk WHERE kode_produk = %s AND aktif = 1",
                 (kode_produk,)
             )
-            active_product = cursor.fetchone()
-            if active_product:
+            active = cursor.fetchone()
+            if active:
                 return jsonify({
                     "success": False,
-                    "message": f"Kode {kode_produk} sudah digunakan oleh produk {active_product[0]}. Gunakan kode produk lain."
+                    "message": f"Kode {kode_produk} sudah digunakan oleh produk {active[0]}. Gunakan kode produk lain."
                 }), 409
 
-            query = "INSERT INTO produk (kode_produk, nama_produk, kategori, harga_jual, stok) VALUES (%s, %s, %s, %s, %s)"
-            cursor.execute(query, (kode_produk, nama_produk, kategori, harga_jual, stok))
+            cursor.execute(
+                "INSERT INTO produk (kode_produk, nama_produk, kategori, harga_jual, stok) VALUES (%s, %s, %s, %s, %s)",
+                (kode_produk, nama_produk, kategori, harga_jual, stok)
+            )
             conn.commit()
             return jsonify({"success": True, "message": "Produk berhasil ditambahkan!"}), 201
-        except Error as e:
+        except Exception as e:
+            if conn:
+                conn.rollback()
             return jsonify({"success": False, "message": str(e)}), 500
         finally:
-            if conn and conn.is_connected():
+            if cursor:
                 cursor.close()
+            if conn:
                 conn.close()
 
 
@@ -184,23 +209,19 @@ def hapus_produk(id_produk):
         cursor = conn.cursor()
         ensure_product_status(cursor)
         cursor.execute("UPDATE produk SET aktif = 0 WHERE id_produk = %s AND aktif = 1", (id_produk,))
-
-        if cursor.rowcount == 0:
-            return jsonify({"success": False, "message": "Produk tidak ditemukan."}), 404
-
         conn.commit()
         return jsonify({"success": True, "message": "Produk berhasil dihapus dari daftar stok."}), 200
-    except Error as e:
+    except Exception as e:
         if conn:
             conn.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
-        if cursor and conn and conn.is_connected():
+        if cursor:
             cursor.close()
+        if conn:
             conn.close()
 
 
-# 2. API TRANSAKSI / ORDER (Simpan Pembelian & Potong Stok)
 @app.route('/api/transaksi', methods=['POST'])
 def simpan_transaksi():
     data = request.json
@@ -220,23 +241,29 @@ def simpan_transaksi():
     no_nota = f"TRX-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     conn = None
+    cursor = None
     try:
         conn = get_db_connection()
-        conn.autocommit = False
         cursor = conn.cursor()
+        conn.autocommit = False
 
-        query_tx = "INSERT INTO transaksi (no_nota, total_harga, bayar, kembali, catatan) VALUES (%s, %s, %s, %s, %s)"
-        cursor.execute(query_tx, (no_nota, total_harga, bayar, kembali, catatan))
-        id_transaksi = cursor.lastrowid
-
-        query_detail = "INSERT INTO detail_transaksi (id_transaksi, id_produk, harga_satuan, jumlah, subtotal) VALUES (%s, %s, %s, %s, %s)"
-        query_update_stok = "UPDATE produk SET stok = stok - %s WHERE id_produk = %s AND stok >= %s"
+        cursor.execute(
+            "INSERT INTO transaksi (no_nota, total_harga, bayar, kembali, catatan) VALUES (%s, %s, %s, %s, %s) RETURNING id_transaksi",
+            (no_nota, total_harga, bayar, kembali, catatan)
+        )
+        result = cursor.fetchone()
+        id_transaksi = result[0]
 
         for item in items:
             subtotal = item['harga_satuan'] * item['jumlah']
-            cursor.execute(query_detail, (id_transaksi, item['id_produk'], item['harga_satuan'], item['jumlah'], subtotal))
-            cursor.execute(query_update_stok, (item['jumlah'], item['id_produk'], item['jumlah']))
-            
+            cursor.execute(
+                "INSERT INTO detail_transaksi (id_transaksi, id_produk, harga_satuan, jumlah, subtotal) VALUES (%s, %s, %s, %s, %s)",
+                (id_transaksi, item['id_produk'], item['harga_satuan'], item['jumlah'], subtotal)
+            )
+            cursor.execute(
+                "UPDATE produk SET stok = stok - %s WHERE id_produk = %s AND stok >= %s",
+                (item['jumlah'], item['id_produk'], item['jumlah'])
+            )
             if cursor.rowcount == 0:
                 conn.rollback()
                 return jsonify({"success": False, "message": f"Stok barang ID {item['id_produk']} tidak mencukupi!"}), 400
@@ -253,99 +280,111 @@ def simpan_transaksi():
             }
         }), 201
 
-    except Error as e:
+    except Exception as e:
         if conn:
             conn.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
-        if conn and conn.is_connected():
+        if cursor:
             cursor.close()
+        if conn:
             conn.close()
 
 
-# 3. API REKAPAN PENJUALAN HARIAN
 @app.route('/api/laporan/harian', methods=['GET'])
 def get_laporan_harian():
     tanggal = request.args.get('tanggal', datetime.now().strftime('%Y-%m-%d'))
 
     conn = None
+    cursor = None
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
 
-        query_ringkasan = """
+        cursor.execute("""
             SELECT 
                 COUNT(id_transaksi) as total_transaksi,
-                IFNULL(SUM(total_harga), 0) as total_pendapatan
+                COALESCE(SUM(total_harga), 0) as total_pendapatan
             FROM transaksi 
-            WHERE DATE(tanggal_waktu) = %s
-        """
-        cursor.execute(query_ringkasan, (tanggal,))
+            WHERE DATE(tanggal_waktu) = %s::date
+        """, (tanggal,))
         ringkasan = cursor.fetchone()
 
-        query_list = """
+        cursor.execute("""
             SELECT id_transaksi, no_nota, tanggal_waktu, total_harga, bayar, kembali, catatan
             FROM transaksi 
-            WHERE DATE(tanggal_waktu) = %s
+            WHERE DATE(tanggal_waktu) = %s::date
             ORDER BY tanggal_waktu DESC
-        """
-        cursor.execute(query_list, (tanggal,))
+        """, (tanggal,))
         daftar_transaksi = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        transaksi_dict = [dict(zip(columns, row)) for row in daftar_transaksi]
 
         return jsonify({
             "success": True,
             "tanggal": tanggal,
-            "ringkasan": ringkasan,
-            "transaksi": daftar_transaksi
+            "ringkasan": {"total_transaksi": ringkasan[0], "total_pendapatan": float(ringkasan[1])} if ringkasan else {},
+            "transaksi": transaksi_dict
         }), 200
 
-    except Error as e:
+    except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
-        if conn and conn.is_connected():
+        if cursor:
             cursor.close()
+        if conn:
             conn.close()
 
 
-# 4. API STATISTIK & ESTIMASI KERAMAIAN
 @app.route('/api/statistik', methods=['GET'])
 def get_statistik():
     tanggal = request.args.get('tanggal', datetime.now().strftime('%Y-%m-%d'))
 
     conn = None
+    cursor = None
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor()
 
-        query_harian = """
+        cursor.execute("""
             SELECT DATE(tanggal_waktu) AS tanggal,
                    COUNT(id_transaksi) AS total_transaksi,
-                   IFNULL(SUM(total_harga), 0) AS total_pendapatan
+                   COALESCE(SUM(total_harga), 0) AS total_pendapatan
             FROM transaksi
-            WHERE DATE(tanggal_waktu) >= DATE_SUB(%s, INTERVAL 29 DAY)
-              AND DATE(tanggal_waktu) <= %s
+            WHERE DATE(tanggal_waktu) >= (%s::date - INTERVAL '29 days')
+              AND DATE(tanggal_waktu) <= %s::date
             GROUP BY DATE(tanggal_waktu)
             ORDER BY tanggal ASC
-        """
-        cursor.execute(query_harian, (tanggal, tanggal))
-        tren_harian = cursor.fetchall()
+        """, (tanggal, tanggal))
+        tren_harian_rows = cursor.fetchall()
+        tren_harian = [{"tanggal": str(row[0]), "total_transaksi": row[1], "total_pendapatan": float(row[2])} for row in tren_harian_rows]
 
-        query_makanan = """
+        cursor.execute("""
             SELECT p.id_produk, p.nama_produk, p.kategori,
                    SUM(dt.jumlah) AS total_terjual,
                    COUNT(DISTINCT DATE(t.tanggal_waktu)) AS hari_terjual,
-                   IFNULL(SUM(dt.subtotal), 0) AS total_pendapatan
+                   COALESCE(SUM(dt.subtotal), 0) AS total_pendapatan
             FROM detail_transaksi dt
             JOIN transaksi t ON t.id_transaksi = dt.id_transaksi
             JOIN produk p ON p.id_produk = dt.id_produk
-            WHERE DATE(t.tanggal_waktu) >= DATE_SUB(%s, INTERVAL 29 DAY)
-              AND DATE(t.tanggal_waktu) <= %s
+            WHERE DATE(t.tanggal_waktu) >= (%s::date - INTERVAL '29 days')
+              AND DATE(t.tanggal_waktu) <= %s::date
             GROUP BY p.id_produk, p.nama_produk, p.kategori
             ORDER BY total_terjual DESC, hari_terjual DESC, total_pendapatan DESC
             LIMIT 5
-        """
-        cursor.execute(query_makanan, (tanggal, tanggal))
-        makanan = cursor.fetchall()
+        """, (tanggal, tanggal))
+        makanan_rows = cursor.fetchall()
+        makanan = [
+            {
+                "id_produk": row[0],
+                "nama_produk": row[1],
+                "kategori": row[2],
+                "total_terjual": row[3],
+                "hari_terjual": row[4],
+                "total_pendapatan": float(row[5])
+            }
+            for row in makanan_rows
+        ]
 
         for item in makanan:
             item['rata_rata_harian'] = round(float(item['total_terjual']) / 30, 1)
@@ -357,11 +396,12 @@ def get_statistik():
             'tren_harian': tren_harian,
             'prediksi_makanan': makanan,
         }), 200
-    except (Error, ValueError) as e:
+    except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
     finally:
-        if conn and conn.is_connected():
+        if cursor:
             cursor.close()
+        if conn:
             conn.close()
 
 
