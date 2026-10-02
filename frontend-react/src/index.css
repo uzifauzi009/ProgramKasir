@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+:root {
+	font-family: 'Trebuchet MS', 'Segoe UI', sans-serif;
+	color: #453d39;
+	background: #f5f0ed;
+	font-synthesis: none;
+	text-rendering: optimizeLegibility;
+}
+
+body {
+	margin: 0;
+	min-width: 320px;
+	background: #f5f0ed;
+}
+
+.login-page {
+	background: radial-gradient(circle at top left, #f8e4d9 0, transparent 38%), #f5f0ed;
+}
+
+.login-card {
+	background: rgba(255, 253, 251, 0.94);
+	border: 1px solid #eadfd9;
+	box-shadow: 0 24px 60px rgba(113, 76, 60, 0.12);
+}
+
+.login-input {
+	background: #fff;
+	border: 1px solid #eadfd9;
+	color: #453d39;
+	transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.login-input:focus {
+	border-color: #ef4444;
+	box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16);
+}
+
+.login-button {
+	background: #dc2626;
+	box-shadow: 0 8px 18px rgba(220, 38, 38, 0.2);
+}
+
+.login-button:hover {
+	background: #b91c1c;
+}
+
+button,
+input,
+select {
+	font: inherit;
+}
+
+.app-shell {
+	background: #f5f0ed;
+}
+
+.app-sidebar,
+.topbar,
+.mobile-nav {
+	background: #fffdfb;
+	border-color: #eadfd9;
+}
+
+.app-sidebar {
+	color: #6b5b53;
+}
+
+.brand-icon,
+.avatar {
+	color: #fffaf7;
+	background: #dc2626;
+}
+
+.brand-accent {
+	color: #dc2626;
+}
+
+.nav-label {
+	color: #dc2626;
+}
+
+.nav-item {
+	color: #786b64;
+}
+
+.nav-item:hover {
+	background: #fee2e2;
+	color: #b91c1c;
+}
+
+.nav-item-active {
+	background: #fecaca;
+	color: #b91c1c;
+}
+
+.main-content {
+	background: #f5f0ed;
+}
+
+.main-content > div {
+	border-color: #eadfd9;
+	box-shadow: 0 8px 24px rgba(113, 76, 60, 0.06);
+}
+
+.main-content .bg-blue-600,
+.main-content .bg-blue-700,
+.main-content .bg-green-600,
+.main-content .bg-green-700 {
+	background-color: #ad5f42 !important;
+}
+
+.main-content .text-blue-600,
+.main-content .text-blue-400,
+.main-content .text-blue-900 {
+	color: #9d5238 !important;
+}
+
+.main-content .bg-blue-50,
+.main-content .bg-green-50 {
+	background-color: #f8eee9 !important;
+	border-color: #ead4ca !important;
+}
+
+.main-content .text-green-600,
+.main-content .text-green-700,
+.main-content .text-green-900 {
+	color: #66816f !important;
+}
+
+.main-content .border-blue-100,
+.main-content .border-gray-200,
+.main-content .border-gray-100 {
+	border-color: #eadfd9;
+}
+
+.main-content .focus\:ring-blue-500:focus {
+	--tw-ring-color: #c78368;
+}
+
+.main-content table thead tr {
+	background: #f8eee9;
+	color: #765247;
+}
+
+.main-content table tbody tr:hover {
+	background: #fffaf7;
+}
+
+@media (max-width: 1023px) {
+	.main-content > div {
+		border-radius: 18px;
+	}
+}
